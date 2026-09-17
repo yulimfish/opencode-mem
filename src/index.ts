@@ -494,9 +494,12 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
         if (!shouldInject) return;
 
+        // P2: use hybrid search for injection when retrieval config is available
+        const { rankAndSelect } = await import("./services/hybrid-search.js");
         const listResult = await memoryClient.listMemories(
           tags.project.tag,
-          CONFIG.chatMessage.maxMemories
+          CONFIG.retrieval.candidates,
+          "project"
         );
 
         let memories = listResult.success ? listResult.memories : [];
@@ -512,12 +515,53 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
         if (memories.length === 0) return;
 
+        // P2: rank candidates with hybrid scoring + MMR + token budget
+        const hybridCandidates = memories.map((m: any) => ({
+          id: m.id,
+          memory: m.summary,
+          similarity: 1.0,
+          createdAt: new Date(m.createdAt).getTime(),
+          tags: Array.isArray(m.metadata?.tags) ? m.metadata.tags : [],
+          metadata: m.metadata,
+          injectCount: m.metadata?.injectCount,
+          lastInjectedAt: m.metadata?.lastInjectedAt,
+          authority: m.metadata?.authority,
+        }));
+
+        const selected = rankAndSelect(hybridCandidates, {
+          gateEnabled: CONFIG.retrieval.gateEnabled ?? true,
+          candidates: CONFIG.retrieval.candidates ?? 20,
+          minScore: CONFIG.retrieval.minScore ?? 0.3,
+          injectionTokenBudget: CONFIG.retrieval.injectionTokenBudget ?? 2048,
+          injectProfileTokenBudget: CONFIG.retrieval.injectProfileTokenBudget ?? 1024,
+        });
+
+        if (selected.length === 0) return;
+
+        // P2: record injection counts asynchronously
+        if (selected.length > 0) {
+          const { tursoVectorSearch } = await import("./services/turso/vector-search.js");
+          const { tursoConnectionManager } = await import("./services/turso/connection-manager.js");
+          const { tursoShardManager } = await import("./services/turso/shard-manager.js");
+          const shards = await tursoShardManager.getAllShards("project", "");
+          for (const shard of shards) {
+            try {
+              const db = await tursoConnectionManager.getConnection(shard.dbPath);
+              for (const candidate of selected) {
+                await tursoVectorSearch.recordInjection(db, candidate.id);
+              }
+            } catch {
+              // best-effort; injection count is non-critical
+            }
+          }
+        }
+
         const projectMemories = {
-          results: memories.map((m: any) => ({
-            similarity: 1.0,
-            memory: m.summary,
+          results: selected.map((c) => ({
+            similarity: c.similarity,
+            memory: c.memory,
           })),
-          total: memories.length,
+          total: selected.length,
           timing: 0,
         };
 

@@ -446,16 +446,24 @@ export class LocalMemoryClient {
       const db = await tursoConnectionManager.getConnection(targetShard.dbPath);
 
       return tursoShardManager.withScopeWriteLock(scope, hash, async () => {
-        // Insert merged record
-        await tursoVectorSearch.insertVector(db, record);
-        await tursoShardManager.incrementVectorCount(targetShard!.id);
+        await db.transaction("write", async (tx) => {
+          // Insert merged record
+          await tursoVectorSearch.insertVectorInTransaction(tx, record);
 
-        // Soft-invalidate originals (unless staged merge)
-        if (!isStagedMerge) {
-          for (const f of found) {
-            await tursoVectorSearch.updateMemoryState(db, f.id, { validUntil: now });
+          // Soft-invalidate originals (unless staged merge)
+          if (!isStagedMerge) {
+            for (const f of found) {
+              const sets = ["valid_until = ?"];
+              const args: (string | number)[] = [now, f.id];
+              await tx.execute({
+                sql: `UPDATE memories SET ${sets.join(", ")} WHERE id = ?`,
+                args,
+              });
+            }
           }
-        }
+        });
+
+        await tursoShardManager.incrementVectorCount(targetShard!.id);
 
         return {
           success: true as const,

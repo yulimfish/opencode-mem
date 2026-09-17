@@ -40,11 +40,11 @@
     "local",
     "standalone"
   ],
-  "author": "opencode-mem",
+  "author": "Yulimfish",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tickernelz/opencode-mem.git"
+    "url": "git+https://github.com/yulimfish/opencode-mem.git"
   },
   "publishConfig": {
     "access": "public"

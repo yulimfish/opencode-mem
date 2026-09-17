@@ -1,0 +1,1 @@
+{"version":3,"file":"web-api-auth.d.ts","sourceRoot":"","sources":["../../src/services/web-api-auth.ts"],"names":[],"mappings":"AAEA,wBAAgB,cAAc,CAAC,IAAI,EAAE,MAAM,GAAG,OAAO,CAEpD;AAED,wBAAgB,0BAA0B,CACxC,IAAI,EAAE,MAAM,EACZ,QAAQ,CAAC,EAAE,MAAM,EACjB,gBAAgB,UAAQ,GACvB,IAAI,CAMN;AAED,wBAAgB,mBAAmB,CAAC,GAAG,EAAE,OAAO,EAAE,QAAQ,CAAC,EAAE,MAAM,GAAG,QAAQ,GAAG,IAAI,CAgBpF"}

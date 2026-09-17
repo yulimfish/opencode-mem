@@ -21,7 +21,6 @@ const SUMMARY_REQUEST_OVERHEAD_BYTES = 1024;
 const SUMMARY_OUTPUT_RESERVE_BYTES = 16384;
 const SUMMARY_ANALYSIS_SUFFIX = `Analyze this conversation. If it contains technical work (code, bugs, features, decisions), create a concise summary and relevant tags. If it's non-technical (greetings, casual chat, incomplete requests), return type="skip" with empty summary.`;
 
-let isCaptureRunning = false;
 const sessionCaptureLocks = new Set<string>();
 
 export async function performAutoCapture(
@@ -137,6 +136,7 @@ async function capturePrompt(
           sessionID,
           promptId: prompt.id,
           captureTimestamp: Date.now(),
+          outcome: (summaryResult as any).outcome,
           displayName: tags.project.displayName,
           userName: tags.project.userName,
           userEmail: tags.project.userEmail,
@@ -558,6 +558,7 @@ CAPTURE if: code changed, bug fixed, feature added, decision made`;
         summary: z.string(),
         type: z.string(),
         tags: z.array(z.string()),
+        outcome: z.enum(["success", "rework", "corrected", "none"]).optional().default("none"),
       });
       const aiPrompt = buildBoundedSummaryPrompt(context, systemPrompt, z.toJSONSchema(schema));
 
@@ -574,7 +575,8 @@ CAPTURE if: code changed, bug fixed, feature added, decision made`;
         summary: result.summary,
         type: result.type,
         tags: (result.tags || []).map((t: string) => t.toLowerCase().trim()),
-      };
+        ...((result as any).outcome ? { outcome: (result as any).outcome } : {}),
+      } as { summary: string; type: string; tags: string[]; outcome?: string };
     } catch (e) {
       opencodeProviderError = e;
       log("auto-capture: opencode provider failed, falling back to external API", {
@@ -667,6 +669,12 @@ CAPTURE if: code changed, bug fixed, feature added, decision made`;
             type: "array",
             items: { type: "string" },
             description: "List of 2-4 technical tags related to the memory",
+          },
+          outcome: {
+            type: "string",
+            enum: ["success", "rework", "corrected", "none"],
+            description:
+              "Result of the work: success (completed cleanly), rework (had to redo), corrected (fixed an error), none (not applicable)",
           },
         },
         required: ["summary", "type", "tags"],

@@ -296,14 +296,14 @@ export class TursoVectorSearch {
         ? `
         SELECT m.id AS id, vector_distance_cos(m.${columnName}, vector32(?)) AS dist
         FROM memories m
-        WHERE m.${columnName} IS NOT NULL
+        WHERE m.${columnName} IS NOT NULL AND ${RETRIEVABLE_SQL}
         ORDER BY dist ASC
         LIMIT ?
       `
         : `
         SELECT m.id AS id, vector_distance_cos(m.${columnName}, vector32(?)) AS dist
         FROM memories m
-        WHERE m.${columnName} IS NOT NULL AND m.container_tag = ?
+        WHERE m.${columnName} IS NOT NULL AND m.container_tag = ? AND ${RETRIEVABLE_SQL}
         ORDER BY dist ASC
         LIMIT ?
       `,

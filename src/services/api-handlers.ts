@@ -207,7 +207,13 @@ export async function handleListMemories(
         projectPath: r.project_path,
         projectName: r.project_name,
         gitRepoUrl: r.git_repo_url,
-        isPinned: r.is_pinned === 1,
+        isPinned: Number(r.is_pinned ?? 0) === 1,
+        isStaged: Number(r.is_staged ?? 0) === 1,
+        source: r.source ? String(r.source) : undefined,
+        authority: r.authority ? String(r.authority) : undefined,
+        observedAt: r.observed_at != null ? Number(r.observed_at) : undefined,
+        validUntil: r.valid_until != null ? Number(r.valid_until) : 0,
+        injectCount: r.inject_count != null ? Number(r.inject_count) : 0,
       };
     });
 
@@ -471,8 +477,9 @@ export async function handleUpdateMemory(
         sql: `
         INSERT INTO memories (
           id, content, vector, tags_vector, container_tag, tags, type, created_at, updated_at,
-          metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url
-        ) VALUES (?, ?, vector32(?), ${tagsVector ? "vector32(?)" : "NULL"}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url,
+          is_pinned, is_staged, source, authority, observed_at, valid_until, inject_count, last_injected_at
+        ) VALUES (?, ?, vector32(?), ${tagsVector ? "vector32(?)" : "NULL"}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         args: [
           id,
@@ -491,6 +498,14 @@ export async function handleUpdateMemory(
           existingMemory.project_path ? String(existingMemory.project_path) : null,
           existingMemory.project_name ? String(existingMemory.project_name) : null,
           existingMemory.git_repo_url ? String(existingMemory.git_repo_url) : null,
+          Number(existingMemory.is_pinned ?? 0),
+          Number(existingMemory.is_staged ?? 0),
+          existingMemory.source ? String(existingMemory.source) : null,
+          existingMemory.authority ? String(existingMemory.authority) : null,
+          existingMemory.observed_at != null ? Number(existingMemory.observed_at) : null,
+          Number(existingMemory.valid_until ?? 0),
+          Number(existingMemory.inject_count ?? 0),
+          existingMemory.last_injected_at != null ? Number(existingMemory.last_injected_at) : null,
         ],
       });
     });
@@ -796,6 +811,28 @@ export async function handleMergeMemories(
     };
   } catch (error) {
     log("handleMergeMemories: error", { error: String(error) });
+    return { success: false, error: String(error) };
+  }
+}
+
+export async function handleApproveMemory(
+  id: string,
+  approve: boolean
+): Promise<ApiResponse<void>> {
+  try {
+    if (!id) return { success: false, error: "id is required" };
+    const shards = await getAllMemoryShards();
+    for (const shard of shards) {
+      const db = await tursoConnectionManager.getConnection(shard.dbPath);
+      const memory = await tursoVectorSearch.getMemoryById(db, id);
+      if (memory) {
+        await tursoVectorSearch.updateMemoryState(db, id, { isStaged: !approve });
+        return { success: true };
+      }
+    }
+    return { success: false, error: "Memory not found" };
+  } catch (error) {
+    log("handleApproveMemory: error", { error: String(error) });
     return { success: false, error: String(error) };
   }
 }

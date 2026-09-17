@@ -1,0 +1,935 @@
+import { tool } from "@opencode-ai/plugin";
+import { memoryClient } from "./services/client.js";
+import { formatContextForPrompt } from "./services/context.js";
+import { getTags } from "./services/tags.js";
+import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
+import { performAutoCapture } from "./services/auto-capture.js";
+import { performUserProfileLearning } from "./services/user-memory-learning.js";
+import { userPromptManager } from "./services/user-prompt/user-prompt-manager.js";
+import { startWebServer, WebServer } from "./services/web-server.js";
+import { ensureTursoReady } from "./services/turso/ready.js";
+import { tursoConnectionManager } from "./services/turso/connection-manager.js";
+import { WebAuth } from "./services/web-auth.js";
+import { isConfigured, CONFIG, initConfig } from "./config.js";
+import { log } from "./services/logger.js";
+import { getLanguageName } from "./services/language-detector.js";
+import { getHostClientConfig } from "./services/ai/opencode-host-config.js";
+import { loadOpencodeProvider } from "./services/ai/opencode-provider-loader.js";
+import { isInternalStructuredSession, STRUCTURED_OUTPUT_AGENT, STRUCTURED_OUTPUT_TOOLS, } from "./services/ai/opencode-provider.js";
+import { INTERNAL_CAPTURE_SESSION_TITLE, isInternalCaptureSessionTitle, isTrackedInternalCaptureSession, } from "./services/ai/internal-capture-sessions.js";
+export { INTERNAL_CAPTURE_SESSION_TITLE, isInternalCaptureSessionTitle };
+export function isStructuredSummaryPromptMessage(userMessage) {
+    // This is the plugin's own structured-summary or profile-analysis request.
+    // OpenCode echoes it through chat.message like a normal user message, but
+    // capturing it would create self-referential memories / an infinite learning loop.
+    if (userMessage.includes("# User Profile Analysis")) {
+        return true;
+    }
+    return userMessage.includes("Analyze this conversation.") && userMessage.includes('type="skip"');
+}
+function extractSessionTitle(response) {
+    if (!response || typeof response !== "object")
+        return undefined;
+    const obj = response;
+    return obj.data?.title ?? obj.title;
+}
+function unwrapSdkData(response) {
+    if (!response || typeof response !== "object")
+        return undefined;
+    const obj = response;
+    return (obj.data ?? response);
+}
+/**
+ * Resolve the session's active agent so compaction memory injection does not
+ * reset OpenCode to the stock "general-purpose" fallback (issue #236).
+ *
+ * Preference order:
+ * 1. session.get().agent (v2 hosts)
+ * 2. Latest non-compaction user message agent
+ * 3. Latest non-compaction / non-summary assistant mode (v1) or agent (v2)
+ */
+export async function resolveSessionAgent(client, sessionID) {
+    const sessionClient = client?.session;
+    if (typeof sessionClient?.get === "function") {
+        try {
+            const session = unwrapSdkData(await sessionClient.get({ path: { id: sessionID } }));
+            if (typeof session?.agent === "string" && session.agent.trim()) {
+                return session.agent.trim();
+            }
+        }
+        catch (error) {
+            log("resolveSessionAgent: session.get failed", { sessionID, error: String(error) });
+        }
+    }
+    if (typeof sessionClient?.messages !== "function") {
+        return undefined;
+    }
+    try {
+        const messages = unwrapSdkData(await sessionClient.messages({ path: { id: sessionID } }));
+        if (!Array.isArray(messages))
+            return undefined;
+        for (let i = messages.length - 1; i >= 0; i--) {
+            const info = messages[i]?.info;
+            if (!info)
+                continue;
+            if (info.role === "user") {
+                if (typeof info.agent === "string" && info.agent.trim()) {
+                    return info.agent.trim();
+                }
+                continue;
+            }
+            if (info.role === "assistant") {
+                if (info.summary === true || info.mode === "compaction")
+                    continue;
+                const agent = (typeof info.agent === "string" && info.agent.trim()) ||
+                    (typeof info.mode === "string" && info.mode.trim()) ||
+                    undefined;
+                if (agent)
+                    return agent;
+            }
+        }
+    }
+    catch (error) {
+        log("resolveSessionAgent: session.messages failed", { sessionID, error: String(error) });
+    }
+    return undefined;
+}
+async function isInternalCaptureSession(client, sessionID) {
+    // Fast path: sessions we created ourselves (survives brief post-delete window).
+    if (isTrackedInternalCaptureSession(sessionID)) {
+        return true;
+    }
+    const sessionClient = client?.session;
+    // Plugin host client uses path-based args (same as session.messages).
+    if (typeof sessionClient?.get === "function") {
+        try {
+            const response = await sessionClient.get({ path: { id: sessionID } });
+            const title = extractSessionTitle(response);
+            if (isInternalCaptureSessionTitle(title)) {
+                return true;
+            }
+            log("internal capture session check via session.get", {
+                sessionID,
+                title: title ?? null,
+                matched: false,
+            });
+        }
+        catch (error) {
+            log("internal capture session check via session.get failed", {
+                sessionID,
+                error: String(error),
+            });
+        }
+    }
+    else {
+        log("internal capture session check: session.get unavailable", { sessionID });
+    }
+    return false;
+}
+/** Least-privilege agent used only by internal structured-output sessions (issue #189). */
+export function applyStructuredOutputAgentConfig(cfg) {
+    cfg.agent = {
+        ...cfg.agent,
+        [STRUCTURED_OUTPUT_AGENT]: {
+            description: "Internal least-privilege agent for opencode-mem structured output",
+            mode: "subagent",
+            // OpenCode reads `steps` at runtime; SDK AgentConfig also documents maxSteps.
+            steps: 2,
+            maxSteps: 2,
+            tools: STRUCTURED_OUTPUT_TOOLS,
+            permission: {
+                "*": "deny",
+                StructuredOutput: "allow",
+            },
+        },
+    };
+}
+export async function configureOpencodeHostTransport(ctx) {
+    const { createV2Client, resetHostFetch, setHostFetch, setV2Client } = await loadOpencodeProvider();
+    resetHostFetch();
+    const hostConfig = getHostClientConfig(ctx);
+    if (hostConfig.fetch) {
+        setHostFetch(hostConfig.fetch);
+    }
+    else {
+        log("OpenCode host fetch unavailable; falling back to global fetch", {
+            clientKeys: hostConfig.clientKeys,
+            sdkConfigCount: hostConfig.sdkConfigCount,
+        });
+    }
+    const serverUrl = hostConfig.baseUrl ?? ctx.serverUrl;
+    if (serverUrl) {
+        setV2Client(createV2Client(serverUrl, {
+            fetch: hostConfig.fetch,
+            headers: hostConfig.headers,
+        }));
+    }
+}
+function logAutoCaptureProviderStatus() {
+    if (!CONFIG.autoCaptureEnabled || CONFIG.autoCaptureProviderStatus.ready)
+        return;
+    log(`Auto-capture disabled by configuration. Issues: ${CONFIG.autoCaptureProviderStatus.issues.join("; ")}.`);
+}
+export const OpenCodeMemPlugin = async (ctx) => {
+    const { directory } = ctx;
+    initConfig(directory);
+    logAutoCaptureProviderStatus();
+    const tags = getTags(directory);
+    let webServer = null;
+    const idleTimeouts = new Map();
+    if (!isConfigured()) {
+    }
+    const GLOBAL_PLUGIN_WARMUP_KEY = Symbol.for("opencode-mem.plugin.warmedup");
+    if (!globalThis[GLOBAL_PLUGIN_WARMUP_KEY] && isConfigured()) {
+        // Fire-and-forget: DB ready + embedding model must not block plugin init.
+        (async () => {
+            try {
+                await memoryClient.warmup();
+                globalThis[GLOBAL_PLUGIN_WARMUP_KEY] = true;
+            }
+            catch (error) {
+                log("Plugin memory warmup failed", { error: String(error) });
+            }
+        })();
+    }
+    await configureOpencodeHostTransport(ctx);
+    (async () => {
+        try {
+            const providerResult = await ctx.client.provider.list();
+            if (providerResult.data?.connected) {
+                const { setConnectedProviders } = await loadOpencodeProvider();
+                setConnectedProviders(providerResult.data.connected);
+                log("opencode providers connected", {
+                    list: providerResult.data.connected,
+                    configured: CONFIG.opencodeProvider || "(not set)",
+                });
+            }
+            else {
+                log("opencode provider list empty or failed", {
+                    data: JSON.stringify(providerResult.data).substring(0, 100),
+                });
+            }
+        }
+        catch (error) {
+            log("Failed to initialize opencode provider state", { error: String(error) });
+        }
+    })();
+    let tursoReadyForWeb = !isConfigured();
+    if (CONFIG.webServerEnabled && isConfigured()) {
+        try {
+            await ensureTursoReady();
+            tursoReadyForWeb = true;
+        }
+        catch (error) {
+            log("Turso ready gate failed before web server start", { error: String(error) });
+            if (ctx.client?.tui) {
+                ctx.client.tui
+                    .showToast({
+                    body: {
+                        title: "Memory Explorer",
+                        message: "Database migration failed; web UI not started",
+                        variant: "error",
+                        duration: 8000,
+                    },
+                })
+                    .catch(() => { });
+            }
+        }
+    }
+    if (CONFIG.webServerEnabled && tursoReadyForWeb) {
+        const webAuth = new WebAuth({
+            password: CONFIG.webServerAuthPassword,
+            username: CONFIG.webServerAuthUsername,
+        });
+        startWebServer({
+            port: CONFIG.webServerPort,
+            host: CONFIG.webServerHost,
+            enabled: CONFIG.webServerEnabled,
+            auth: webAuth,
+            apiToken: CONFIG.webServerApiToken,
+        })
+            .then((server) => {
+            webServer = server;
+            const url = webServer.getUrl();
+            webServer.setOnTakeoverCallback(async () => {
+                if (ctx.client?.tui) {
+                    ctx.client.tui
+                        .showToast({
+                        body: {
+                            title: "Memory Explorer",
+                            message: "Took over web server ownership",
+                            variant: "success",
+                            duration: 3000,
+                        },
+                    })
+                        .catch(() => { });
+                }
+            });
+            webServer.setOnPortsExhaustedCallback(() => {
+                if (ctx.client?.tui) {
+                    ctx.client.tui
+                        .showToast({
+                        body: {
+                            title: "Memory Explorer",
+                            message: `Web UI unavailable: ports ${CONFIG.webServerPort}-${CONFIG.webServerPort + 10} are held by non-responsive processes`,
+                            variant: "error",
+                            duration: 5000,
+                        },
+                    })
+                        .catch(() => { });
+                }
+            });
+            if (webServer.isServerOwner()) {
+                if (ctx.client?.tui) {
+                    ctx.client.tui
+                        .showToast({
+                        body: {
+                            title: "Memory Explorer",
+                            message: webAuth.isEnabled()
+                                ? `Web UI started at ${url} (auth required)`
+                                : `Web UI started at ${url}`,
+                            variant: "success",
+                            duration: 5000,
+                        },
+                    })
+                        .catch(() => { });
+                }
+            }
+            else {
+                if (ctx.client?.tui) {
+                    ctx.client.tui
+                        .showToast({
+                        body: {
+                            title: "Memory Explorer",
+                            message: `Web UI available at ${url}`,
+                            variant: "info",
+                            duration: 3000,
+                        },
+                    })
+                        .catch(() => { });
+                }
+            }
+        })
+            .catch((error) => {
+            log("Web server failed to start", { error: String(error) });
+            if (ctx.client?.tui) {
+                ctx.client.tui
+                    .showToast({
+                    body: {
+                        title: "Memory Explorer Error",
+                        message: `Failed to start: ${String(error)}`,
+                        variant: "error",
+                        duration: 5000,
+                    },
+                })
+                    .catch(() => { });
+            }
+        });
+    }
+    let cleanedUp = false;
+    const cleanupPlugin = async () => {
+        if (cleanedUp)
+            return;
+        cleanedUp = true;
+        for (const timer of idleTimeouts.values()) {
+            clearTimeout(timer);
+        }
+        idleTimeouts.clear();
+        if (webServer)
+            await webServer.stop();
+        if (memoryClient)
+            await memoryClient.close();
+    };
+    const shutdownHandler = async () => {
+        try {
+            await cleanupPlugin();
+        }
+        catch (error) {
+            log("Shutdown error", { error: String(error) });
+            process.exitCode = 1;
+        }
+    };
+    process.on("SIGINT", shutdownHandler);
+    process.on("SIGTERM", shutdownHandler);
+    process.on("beforeExit", () => {
+        if (!cleanedUp) {
+            void cleanupPlugin();
+        }
+    });
+    process.on("exit", () => {
+        // Best-effort sync close when the host exits without SIGINT/SIGTERM.
+        if (!cleanedUp) {
+            try {
+                tursoConnectionManager.closeAllSync();
+            }
+            catch {
+                // ignore — module may already be torn down
+            }
+        }
+    });
+    return {
+        config: async (cfg) => {
+            applyStructuredOutputAgentConfig(cfg);
+        },
+        "chat.message": async (input, output) => {
+            if (!isConfigured() || !CONFIG.chatMessage.enabled)
+                return;
+            try {
+                const textParts = output.parts.filter((p) => p.type === "text");
+                if (textParts.length === 0)
+                    return;
+                const userMessage = textParts.map((p) => p.text).join("\n");
+                if (!userMessage.trim())
+                    return;
+                if (isStructuredSummaryPromptMessage(userMessage) ||
+                    isInternalStructuredSession(input.sessionID)) {
+                    return;
+                }
+                await userPromptManager.savePrompt(input.sessionID, output.message.id, directory, userMessage);
+                const messagesResponse = await ctx.client.session.messages({
+                    path: { id: input.sessionID },
+                });
+                const messages = messagesResponse.data || [];
+                const hasNonSyntheticUserMessages = messages.some((m) => m.info.role === "user" &&
+                    !m.parts.every((p) => p.type !== "text" || p.synthetic === true));
+                const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+                const isAfterCompaction = lastMessage?.info?.summary === true;
+                const shouldInject = CONFIG.chatMessage.injectOn === "always" ||
+                    !hasNonSyntheticUserMessages ||
+                    (isAfterCompaction &&
+                        messages.filter((m) => m.info.role === "user" &&
+                            !m.parts.every((p) => p.type !== "text" || p.synthetic === true)).length === 1);
+                if (!shouldInject)
+                    return;
+                // P2: use hybrid search for injection when retrieval config is available
+                const { rankAndSelect } = await import("./services/hybrid-search.js");
+                const listResult = await memoryClient.listMemories(tags.project.tag, CONFIG.retrieval.candidates, "project");
+                let memories = listResult.success ? listResult.memories : [];
+                if (CONFIG.chatMessage.excludeCurrentSession) {
+                    memories = memories.filter((m) => m.metadata?.sessionID !== input.sessionID);
+                }
+                if (CONFIG.chatMessage.maxAgeDays) {
+                    const cutoffDate = Date.now() - CONFIG.chatMessage.maxAgeDays * 86400000;
+                    memories = memories.filter((m) => new Date(m.createdAt).getTime() > cutoffDate);
+                }
+                if (memories.length === 0)
+                    return;
+                // P2: rank candidates with hybrid scoring + MMR + token budget
+                const hybridCandidates = memories.map((m) => ({
+                    id: m.id,
+                    memory: m.summary,
+                    similarity: 1.0,
+                    createdAt: new Date(m.createdAt).getTime(),
+                    tags: Array.isArray(m.metadata?.tags) ? m.metadata.tags : [],
+                    metadata: m.metadata,
+                    injectCount: m.metadata?.injectCount,
+                    lastInjectedAt: m.metadata?.lastInjectedAt,
+                    authority: m.metadata?.authority,
+                }));
+                const selected = rankAndSelect(hybridCandidates, {
+                    gateEnabled: CONFIG.retrieval.gateEnabled ?? true,
+                    candidates: CONFIG.retrieval.candidates ?? 20,
+                    minScore: CONFIG.retrieval.minScore ?? 0.3,
+                    injectionTokenBudget: CONFIG.retrieval.injectionTokenBudget ?? 2048,
+                    injectProfileTokenBudget: CONFIG.retrieval.injectProfileTokenBudget ?? 1024,
+                });
+                if (selected.length === 0)
+                    return;
+                // P2: record injection counts asynchronously
+                if (selected.length > 0) {
+                    const { tursoVectorSearch } = await import("./services/turso/vector-search.js");
+                    const { tursoConnectionManager } = await import("./services/turso/connection-manager.js");
+                    const { tursoShardManager } = await import("./services/turso/shard-manager.js");
+                    const shards = await tursoShardManager.getAllShards("project", "");
+                    for (const shard of shards) {
+                        try {
+                            const db = await tursoConnectionManager.getConnection(shard.dbPath);
+                            for (const candidate of selected) {
+                                await tursoVectorSearch.recordInjection(db, candidate.id);
+                            }
+                        }
+                        catch {
+                            // best-effort; injection count is non-critical
+                        }
+                    }
+                }
+                const projectMemories = {
+                    results: selected.map((c) => ({
+                        similarity: c.similarity,
+                        memory: c.memory,
+                    })),
+                    total: selected.length,
+                    timing: 0,
+                };
+                const userId = tags.user.userEmail || null;
+                const memoryContext = await formatContextForPrompt(userId, projectMemories);
+                if (memoryContext) {
+                    const contextPart = {
+                        id: `prt-memory-context-${Date.now()}`,
+                        sessionID: input.sessionID,
+                        messageID: output.message.id,
+                        type: "text",
+                        text: memoryContext,
+                        synthetic: true,
+                    };
+                    output.parts.unshift(contextPart);
+                }
+            }
+            catch (error) {
+                log("chat.message: ERROR", { error: String(error) });
+                if (ctx.client?.tui && CONFIG.showErrorToasts) {
+                    await ctx.client.tui
+                        .showToast({
+                        body: {
+                            title: "Memory System Error",
+                            message: String(error),
+                            variant: "error",
+                            duration: 5000,
+                        },
+                    })
+                        .catch(() => { });
+                }
+            }
+        },
+        "chat.params": async (input) => {
+            if (!isConfigured() || CONFIG.opencodeModel !== "inherit")
+                return;
+            try {
+                await userPromptManager.setPromptModel(input.message.id, input.model.providerID, input.model.id);
+            }
+            catch (error) {
+                log("chat.params: ERROR", { error: String(error) });
+            }
+        },
+        tool: {
+            memory: tool({
+                description: `Manage and query project memory (MATCH USER LANGUAGE: ${getLanguageName(CONFIG.autoCaptureLanguage || "en")}). Use 'search' with technical keywords/tags, 'add' to store knowledge, 'profile' for preferences. Use migrate/list-shards/export/import when a project directory moves. Search/list scope: project or all-projects.`,
+                args: {
+                    mode: tool.schema
+                        .enum([
+                        "add",
+                        "search",
+                        "profile",
+                        "list",
+                        "forget",
+                        "help",
+                        "migrate",
+                        "list-shards",
+                        "export",
+                        "import",
+                    ])
+                        .optional(),
+                    content: tool.schema.string().optional(),
+                    query: tool.schema.string().optional(),
+                    tags: tool.schema.string().optional(),
+                    type: tool.schema.string().optional(),
+                    memoryId: tool.schema.string().optional(),
+                    limit: tool.schema.number().optional(),
+                    scope: tool.schema.enum(["project", "all-projects"]).optional(),
+                    fromPath: tool.schema.string().optional(),
+                    fromHash: tool.schema.string().optional(),
+                    outputPath: tool.schema.string().optional(),
+                    inputPath: tool.schema.string().optional(),
+                    dryRun: tool.schema.boolean().optional(),
+                    allowLinkedSource: tool.schema.boolean().optional(),
+                },
+                async execute(args) {
+                    if (!isConfigured()) {
+                        return JSON.stringify({
+                            success: false,
+                            error: "Memory system not configured properly.",
+                        });
+                    }
+                    const mode = args.mode || "help";
+                    const needsEmbedding = !["help", "list-shards", "migrate", "export"].includes(mode);
+                    if (needsEmbedding) {
+                        const embeddingInitError = memoryClient.getEmbeddingInitError?.();
+                        if (embeddingInitError) {
+                            return JSON.stringify({ success: false, error: embeddingInitError });
+                        }
+                    }
+                    try {
+                        if (needsEmbedding) {
+                            await memoryClient.warmup();
+                        }
+                        else if (mode !== "help") {
+                            await memoryClient.ensureStorageReady();
+                        }
+                    }
+                    catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
+                        return JSON.stringify({
+                            success: false,
+                            error: `Memory system failed to initialize: ${message}`,
+                        });
+                    }
+                    const langName = getLanguageName(CONFIG.autoCaptureLanguage || "en");
+                    try {
+                        switch (mode) {
+                            case "help":
+                                return JSON.stringify({
+                                    success: true,
+                                    message: "Memory System Usage Guide",
+                                    commands: [
+                                        {
+                                            command: "add",
+                                            description: `Store new memory (MATCH USER LANGUAGE: ${langName})`,
+                                            args: ["content", "type?", "tags?"],
+                                        },
+                                        {
+                                            command: "search",
+                                            description: `Search memories via keywords (MATCH USER LANGUAGE: ${langName})`,
+                                            args: ["query"],
+                                        },
+                                        {
+                                            command: "profile",
+                                            description: "View user profile or save an explicit preference (provide content to write)",
+                                            args: ["content?"],
+                                        },
+                                        { command: "list", description: "List recent memories", args: ["limit?"] },
+                                        { command: "forget", description: "Remove memory", args: ["memoryId"] },
+                                        {
+                                            command: "list-shards",
+                                            description: "List project memory shards and orphaned path associations",
+                                            args: [],
+                                        },
+                                        {
+                                            command: "migrate",
+                                            description: "Reassociate orphaned project shards after a directory move (target must be empty)",
+                                            args: ["fromPath?", "fromHash?", "dryRun?", "allowLinkedSource?"],
+                                        },
+                                        {
+                                            command: "export",
+                                            description: "Export current project memories to a portable JSON file",
+                                            args: ["outputPath"],
+                                        },
+                                        {
+                                            command: "import",
+                                            description: "Import memories from a portable JSON file (re-embeds; aborts on duplicate ids)",
+                                            args: ["inputPath", "dryRun?"],
+                                        },
+                                    ],
+                                    tagGuidance: "Use technical keywords for search. Tags rank highest.",
+                                });
+                            case "add":
+                                if (!args.content)
+                                    return JSON.stringify({ success: false, error: "content required" });
+                                const sanitizedContent = stripPrivateContent(args.content);
+                                if (isFullyPrivate(args.content))
+                                    return JSON.stringify({ success: false, error: "Private content blocked" });
+                                const tagInfo = tags.project;
+                                const parsedTags = args.tags
+                                    ? args.tags.split(",").map((t) => t.trim().toLowerCase())
+                                    : undefined;
+                                const result = await memoryClient.addMemory(sanitizedContent, tagInfo.tag, {
+                                    type: args.type,
+                                    tags: parsedTags,
+                                    displayName: tagInfo.displayName,
+                                    userName: tagInfo.userName,
+                                    userEmail: tagInfo.userEmail,
+                                    projectPath: tagInfo.projectPath,
+                                    projectName: tagInfo.projectName,
+                                    gitRepoUrl: tagInfo.gitRepoUrl,
+                                });
+                                return JSON.stringify({
+                                    success: result.success,
+                                    message: result.success ? `Memory added` : result.error,
+                                    id: result.success ? result.id : undefined,
+                                    tags: parsedTags,
+                                });
+                            case "search":
+                                if (!args.query)
+                                    return JSON.stringify({ success: false, error: "query required" });
+                                const searchRes = await memoryClient.searchMemories(args.query, tags.project.tag, args.scope ?? CONFIG.memory.defaultScope);
+                                if (!searchRes.success)
+                                    return JSON.stringify({ success: false, error: searchRes.error });
+                                return formatSearchResults(args.query, searchRes, args.limit);
+                            case "profile": {
+                                if (args.query) {
+                                    return JSON.stringify({
+                                        success: false,
+                                        error: "query is not valid for profile mode. Use content to write a preference or omit all args to read.",
+                                    });
+                                }
+                                const { userProfileManager } = await import("./services/user-profile/user-profile-manager.js");
+                                const userId = tags.user.userEmail || "unknown";
+                                // --- WRITE: explicit preference ---
+                                if (args.content !== undefined) {
+                                    const trimmed = args.content.trim();
+                                    if (!trimmed) {
+                                        return JSON.stringify({ success: false, error: "content must not be blank" });
+                                    }
+                                    if (!tags.user.userEmail) {
+                                        return JSON.stringify({
+                                            success: false,
+                                            error: "Cannot save profile preference because no user email could be resolved. Configure userEmailOverride or git user.email.",
+                                        });
+                                    }
+                                    const sanitizedContent = stripPrivateContent(trimmed);
+                                    const hasNonPrivateContent = sanitizedContent.replace(/\[REDACTED\]/g, "").trim().length > 0;
+                                    if (isFullyPrivate(trimmed) || !hasNonPrivateContent) {
+                                        return JSON.stringify({ success: false, error: "Private content blocked" });
+                                    }
+                                    const newPreference = {
+                                        category: "explicit",
+                                        description: sanitizedContent,
+                                        confidence: 1.0,
+                                        frequency: 1,
+                                        evidence: ["manual-write"],
+                                        lastSeen: Date.now(),
+                                    };
+                                    const existingProfile = await userProfileManager.getActiveProfile(userId);
+                                    if (existingProfile) {
+                                        const existingData = JSON.parse(existingProfile.profileData);
+                                        const mergedData = await userProfileManager.mergeProfileData(existingData, {
+                                            preferences: [newPreference],
+                                        }, undefined, existingProfile.id);
+                                        await userProfileManager.updateProfile(existingProfile.id, mergedData, 0, `Explicit preference added: ${sanitizedContent.slice(0, 80)}`);
+                                        return JSON.stringify({
+                                            success: true,
+                                            message: "Preference saved to profile",
+                                        });
+                                    }
+                                    else {
+                                        await userProfileManager.createProfile(userId, tags.user.displayName || userId, tags.user.userName || userId, tags.user.userEmail || userId, { preferences: [newPreference], patterns: [], workflows: [] }, 0);
+                                        return JSON.stringify({
+                                            success: true,
+                                            message: "Profile created with preference",
+                                        });
+                                    }
+                                }
+                                // --- READ: no content provided ---
+                                const profile = await userProfileManager.getActiveProfile(userId);
+                                if (!profile)
+                                    return JSON.stringify({ success: true, profile: null });
+                                const pData = JSON.parse(profile.profileData);
+                                return JSON.stringify({
+                                    success: true,
+                                    profile: {
+                                        ...pData,
+                                        version: profile.version,
+                                        lastAnalyzed: profile.lastAnalyzedAt,
+                                    },
+                                });
+                            }
+                            case "list":
+                                const listRes = await memoryClient.listMemories(tags.project.tag, args.limit || 20, args.scope ?? CONFIG.memory.defaultScope);
+                                if (!listRes.success)
+                                    return JSON.stringify({ success: false, error: listRes.error });
+                                return JSON.stringify({
+                                    success: true,
+                                    count: listRes.memories?.length,
+                                    memories: listRes.memories?.map((m) => ({
+                                        id: m.id,
+                                        content: m.summary,
+                                        createdAt: m.createdAt,
+                                    })),
+                                });
+                            case "forget":
+                                if (!args.memoryId)
+                                    return JSON.stringify({ success: false, error: "memoryId required" });
+                                const delRes = await memoryClient.deleteMemory(args.memoryId);
+                                return JSON.stringify({ success: delRes.success, message: `Memory removed` });
+                            case "list-shards": {
+                                const listShardsRes = await memoryClient.listShards(directory);
+                                return JSON.stringify(listShardsRes);
+                            }
+                            case "migrate": {
+                                if (!args.fromPath && !args.fromHash) {
+                                    return JSON.stringify({
+                                        success: false,
+                                        error: "fromPath or fromHash required. Run memory list-shards to discover orphaned shards.",
+                                    });
+                                }
+                                const migrateRes = await memoryClient.migrateProjectPath({
+                                    currentDirectory: directory,
+                                    fromPath: args.fromPath,
+                                    fromHash: args.fromHash,
+                                    dryRun: args.dryRun,
+                                    allowLinkedSource: args.allowLinkedSource,
+                                });
+                                return JSON.stringify(migrateRes);
+                            }
+                            case "export": {
+                                if (!args.outputPath) {
+                                    return JSON.stringify({ success: false, error: "outputPath required" });
+                                }
+                                const exportRes = await memoryClient.exportMemories(directory, args.outputPath);
+                                return JSON.stringify(exportRes);
+                            }
+                            case "import": {
+                                if (!args.inputPath) {
+                                    return JSON.stringify({ success: false, error: "inputPath required" });
+                                }
+                                const importRes = await memoryClient.importMemories(directory, args.inputPath, args.dryRun);
+                                return JSON.stringify(importRes);
+                            }
+                            default:
+                                return JSON.stringify({ success: false, error: `Unknown mode: ${mode}` });
+                        }
+                    }
+                    catch (error) {
+                        return JSON.stringify({ success: false, error: String(error) });
+                    }
+                },
+            }),
+        },
+        event: async (input) => {
+            const event = input.event;
+            if (event.type === "session.idle") {
+                if (!isConfigured() || !CONFIG.autoCaptureEnabled)
+                    return;
+                const sessionID = event.properties?.sessionID;
+                if (!sessionID)
+                    return;
+                // Transient structured-output sessions must not re-trigger capture/learning
+                // (that self-schedules an unbounded idle → LLM → idle loop).
+                if (await isInternalCaptureSession(ctx.client, sessionID)) {
+                    log("Skipping idle processing for internal capture session", { sessionID });
+                    return;
+                }
+                // P1 fix: subagent (task tool child) sessions must not trigger
+                // project-memory capture — their transcript is already covered by
+                // the parent session, and capturing it created duplicate noise.
+                try {
+                    const sessionInfo = await ctx.client.session.get({ path: { id: sessionID } });
+                    if (sessionInfo?.data?.parentID) {
+                        log("Auto-capture skipped for subagent session", { sessionID });
+                        return;
+                    }
+                }
+                catch (error) {
+                    log("session.get failed; proceeding with capture", { sessionID, error: String(error) });
+                }
+                const existingTimer = idleTimeouts.get(sessionID);
+                if (existingTimer)
+                    clearTimeout(existingTimer);
+                const timer = setTimeout(async () => {
+                    idleTimeouts.delete(sessionID);
+                    try {
+                        await performAutoCapture(ctx, sessionID, directory);
+                        if (webServer?.isServerOwner()) {
+                            await performUserProfileLearning(ctx, directory);
+                            const { cleanupService } = await import("./services/cleanup-service.js");
+                            if (await cleanupService.shouldRunCleanup())
+                                await cleanupService.runCleanup();
+                        }
+                    }
+                    catch (error) {
+                        log("Idle processing error", { error: String(error) });
+                    }
+                }, 10000);
+                idleTimeouts.set(sessionID, timer);
+            }
+            if (event.type === "session.compacted") {
+                if (!isConfigured() || !CONFIG.compaction.enabled)
+                    return;
+                const sessionID = event.properties?.sessionID;
+                if (!sessionID)
+                    return;
+                try {
+                    const tags = getTags(directory);
+                    const memoriesResult = await memoryClient.searchMemoriesBySessionID(sessionID, tags.project.tag, CONFIG.compaction.memoryLimit);
+                    if (!memoriesResult.success || memoriesResult.results.length === 0) {
+                        return;
+                    }
+                    const memoryContext = formatMemoriesForCompaction(memoriesResult.results);
+                    const agent = await resolveSessionAgent(ctx.client, sessionID);
+                    if (!agent) {
+                        log("Compaction: skipped memory injection because session agent could not be resolved", {
+                            sessionID,
+                        });
+                        return;
+                    }
+                    await ctx.client.session.prompt({
+                        path: { id: sessionID },
+                        body: {
+                            parts: [
+                                {
+                                    id: `prt-compaction-${Date.now()}`,
+                                    type: "text",
+                                    text: memoryContext,
+                                    synthetic: true,
+                                },
+                            ],
+                            noReply: true,
+                            agent,
+                        },
+                    });
+                    if (ctx.client?.tui) {
+                        await ctx.client.tui
+                            .showToast({
+                            body: {
+                                title: "Memory Restored",
+                                message: `${memoriesResult.results.length} memories injected after compaction`,
+                                variant: "success",
+                                duration: 3000,
+                            },
+                        })
+                            .catch(() => { });
+                    }
+                    log("Compaction memory injected", {
+                        sessionID,
+                        count: memoriesResult.results.length,
+                        agent: agent ?? null,
+                    });
+                }
+                catch (error) {
+                    log("Compaction handler error", { error: String(error) });
+                }
+            }
+        },
+    };
+};
+function formatSearchResults(query, results, limit) {
+    const memoryResults = results.results || [];
+    return JSON.stringify({
+        success: true,
+        query,
+        count: memoryResults.length,
+        results: memoryResults.slice(0, limit || 10).map((r) => ({
+            id: r.id,
+            content: r.memory || r.chunk,
+            similarity: Math.round(r.similarity * 100),
+        })),
+    });
+}
+const EMBEDDED_TAGS_FOOTER_RE = /\n*Tags: ([^\n]*)\s*$/;
+function normalizeTagsKey(tags) {
+    return tags
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0)
+        .sort()
+        .join("\0");
+}
+function stripMatchingEmbeddedTagsFooter(memory, tags) {
+    const match = memory.match(EMBEDDED_TAGS_FOOTER_RE);
+    if (!match) {
+        return memory;
+    }
+    const footerValue = match[1];
+    if (footerValue === undefined) {
+        return memory;
+    }
+    const embeddedTags = footerValue
+        .split(",")
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0);
+    if (normalizeTagsKey(embeddedTags) !== normalizeTagsKey(tags)) {
+        return memory;
+    }
+    return memory.replace(EMBEDDED_TAGS_FOOTER_RE, "");
+}
+function formatMemoriesForCompaction(memories) {
+    let output = `## Restored Session Memory\n\n`;
+    memories.forEach((m, i) => {
+        const tags = Array.isArray(m.tags) ? m.tags : [];
+        const body = tags.length > 0 ? stripMatchingEmbeddedTagsFooter(m.memory ?? "", tags) : (m.memory ?? "");
+        output += `### Memory ${i + 1}\n`;
+        output += `${body}\n\n`;
+        if (tags.length > 0) {
+            output += `Tags: ${tags.join(", ")}\n\n`;
+        }
+    });
+    return output;
+}

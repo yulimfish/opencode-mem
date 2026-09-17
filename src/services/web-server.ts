@@ -21,6 +21,7 @@ import {
   handlePinMemory,
   handleUnpinMemory,
   handleMergeMemories,
+  handleApproveMemory,
   handleRunCleanup,
   handleRunDeduplication,
   handleDetectMigration,
@@ -591,6 +592,24 @@ export class WebServer {
           Array.isArray(body?.ids) ? body.ids : [],
           typeof body?.content === "string" ? body.content : ""
         );
+        return this.jsonResponse(result);
+      }
+
+      if (path.match(/^\/api\/memories\/[^/]+\/approve$/) && method === "POST") {
+        const id = path.split("/")[3];
+        if (!id) {
+          return this.jsonResponse({ success: false, error: "Invalid ID" });
+        }
+        const result = await handleApproveMemory(id, true);
+        return this.jsonResponse(result);
+      }
+
+      if (path.match(/^\/api\/memories\/[^/]+\/unstage$/) && method === "POST") {
+        const id = path.split("/")[3];
+        if (!id) {
+          return this.jsonResponse({ success: false, error: "Invalid ID" });
+        }
+        const result = await handleApproveMemory(id, false);
         return this.jsonResponse(result);
       }
 

@@ -265,7 +265,8 @@ export class MigrationService {
     const memories = await sourceDb.all(`
       SELECT
         id, content, container_tag, tags, type, created_at, updated_at, metadata,
-        display_name, user_name, user_email, project_path, project_name, git_repo_url, is_pinned
+        display_name, user_name, user_email, project_path, project_name, git_repo_url, is_pinned,
+        is_staged, source, authority, observed_at, valid_until, inject_count, last_injected_at
       FROM memories
       ORDER BY created_at DESC
     `);
@@ -320,6 +321,14 @@ export class MigrationService {
               projectPath: memory.project_path ? String(memory.project_path) : undefined,
               projectName: memory.project_name ? String(memory.project_name) : undefined,
               gitRepoUrl: memory.git_repo_url ? String(memory.git_repo_url) : undefined,
+              isStaged: Number(memory.is_staged ?? 0) === 1,
+              source: memory.source ? String(memory.source) : undefined,
+              authority: memory.authority ? String(memory.authority) : undefined,
+              observedAt: memory.observed_at != null ? Number(memory.observed_at) : undefined,
+              validUntil: memory.valid_until != null ? Number(memory.valid_until) : 0,
+              injectCount: memory.inject_count != null ? Number(memory.inject_count) : 0,
+              lastInjectedAt:
+                memory.last_injected_at != null ? Number(memory.last_injected_at) : undefined,
             },
             isPinned: Number(memory.is_pinned ?? 0) === 1,
           });

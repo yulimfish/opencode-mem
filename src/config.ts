@@ -610,6 +610,9 @@ function getEmbeddingDimensions(model: string): number {
     "text-embedding-3-large": 3072,
     "text-embedding-ada-002": 1536,
 
+    // Alibaba Cloud MaaS models
+    "qwen3.7-text-embedding": 1024,
+
     // Cohere API models
     "embed-english-v3.0": 1024,
     "embed-multilingual-v3.0": 1024,
