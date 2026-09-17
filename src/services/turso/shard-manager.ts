@@ -309,7 +309,14 @@ export class TursoShardManager {
             project_path TEXT,
             project_name TEXT,
             git_repo_url TEXT,
-            is_pinned INTEGER DEFAULT 0
+            is_pinned INTEGER DEFAULT 0,
+            is_staged INTEGER DEFAULT 0,
+            source TEXT,
+            authority TEXT,
+            observed_at INTEGER,
+            valid_until INTEGER DEFAULT 0,
+            inject_count INTEGER DEFAULT 0,
+            last_injected_at INTEGER
           )
         `,
       },
@@ -324,6 +331,9 @@ export class TursoShardManager {
       },
       {
         sql: `CREATE INDEX IF NOT EXISTS idx_is_pinned ON memories(is_pinned)`,
+      },
+      {
+        sql: `CREATE INDEX IF NOT EXISTS idx_is_staged ON memories(is_staged)`,
       },
       {
         sql: `
@@ -349,6 +359,25 @@ export class TursoShardManager {
         `,
       },
     ]);
+
+    // Lazy column migration for shards created before P1 fields existed.
+    // PRAGMA table_info is cheap; ALTER TABLE ADD COLUMN is idempotent via the IF NOT EXISTS-like guard.
+    const P1_COLUMNS: Array<[string, string]> = [
+      ["is_staged", "INTEGER DEFAULT 0"],
+      ["source", "TEXT"],
+      ["authority", "TEXT"],
+      ["observed_at", "INTEGER"],
+      ["valid_until", "INTEGER DEFAULT 0"],
+      ["inject_count", "INTEGER DEFAULT 0"],
+      ["last_injected_at", "INTEGER"],
+    ];
+    const pragmaRows = await db.all(`PRAGMA table_info(memories)`);
+    const existing = new Set(pragmaRows.map((r: any) => String(r.name)));
+    for (const [col, def] of P1_COLUMNS) {
+      if (!existing.has(col)) {
+        await db.run(`ALTER TABLE memories ADD COLUMN ${col} ${def}`);
+      }
+    }
   }
 
   private rowToShardInfo(row: Record<string, unknown>): ShardInfo {

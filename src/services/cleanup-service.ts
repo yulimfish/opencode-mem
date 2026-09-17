@@ -70,8 +70,8 @@ export class CleanupService {
         const db = await tursoConnectionManager.getConnection(shard.dbPath);
         const oldMemories = await db.all(
           `
-          SELECT id, container_tag, is_pinned FROM memories
-          WHERE updated_at < ?
+          SELECT id, container_tag, is_pinned, is_staged FROM memories
+          WHERE updated_at < ? AND is_staged = 0
         `,
           [cutoffTime]
         );

@@ -15,6 +15,9 @@ function parseMetadata(value: unknown): Record<string, unknown> | undefined {
   }
 }
 
+/** SQL predicate: only retrievable rows (not staged, not soft-invalidated). */
+const RETRIEVABLE_SQL = `is_staged = 0 AND (valid_until IS NULL OR valid_until = 0)`;
+
 export class TursoVectorSearch {
   async insertVectorInTransaction(tx: Transaction, record: MemoryRecord): Promise<void> {
     const contentVector = vectorToJson(record.vector);
@@ -31,6 +34,13 @@ export class TursoVectorSearch {
       record.projectPath || null,
       record.projectName || null,
       record.gitRepoUrl || null,
+      record.isStaged ? 1 : 0,
+      record.source || null,
+      record.authority || null,
+      record.observedAt ?? null,
+      record.validUntil ?? 0,
+      record.injectCount ?? 0,
+      record.lastInjectedAt ?? null,
     ];
 
     if (record.tagsVector) {
@@ -38,8 +48,9 @@ export class TursoVectorSearch {
         sql: `
         INSERT INTO memories (
           id, content, vector, tags_vector, container_tag, tags, type, created_at, updated_at,
-          metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url
-        ) VALUES (?, ?, vector32(?), vector32(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url,
+          is_staged, source, authority, observed_at, valid_until, inject_count, last_injected_at
+        ) VALUES (?, ?, vector32(?), vector32(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         args: [
           record.id,
@@ -56,8 +67,9 @@ export class TursoVectorSearch {
       sql: `
       INSERT INTO memories (
         id, content, vector, tags_vector, container_tag, tags, type, created_at, updated_at,
-        metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url
-      ) VALUES (?, ?, vector32(?), NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url,
+        is_staged, source, authority, observed_at, valid_until, inject_count, last_injected_at
+      ) VALUES (?, ?, vector32(?), NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
       args: [record.id, record.content, contentVector, ...commonArgs],
     });
@@ -78,6 +90,13 @@ export class TursoVectorSearch {
       record.projectPath || null,
       record.projectName || null,
       record.gitRepoUrl || null,
+      record.isStaged ? 1 : 0,
+      record.source || null,
+      record.authority || null,
+      record.observedAt ?? null,
+      record.validUntil ?? 0,
+      record.injectCount ?? 0,
+      record.lastInjectedAt ?? null,
     ];
 
     if (record.tagsVector) {
@@ -85,8 +104,9 @@ export class TursoVectorSearch {
         `
         INSERT INTO memories (
           id, content, vector, tags_vector, container_tag, tags, type, created_at, updated_at,
-          metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url
-        ) VALUES (?, ?, vector32(?), vector32(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url,
+          is_staged, source, authority, observed_at, valid_until, inject_count, last_injected_at
+        ) VALUES (?, ?, vector32(?), vector32(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         [record.id, record.content, contentVector, vectorToJson(record.tagsVector), ...commonArgs]
       );
@@ -97,8 +117,9 @@ export class TursoVectorSearch {
       `
       INSERT INTO memories (
         id, content, vector, tags_vector, container_tag, tags, type, created_at, updated_at,
-        metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url
-      ) VALUES (?, ?, vector32(?), NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url,
+        is_staged, source, authority, observed_at, valid_until, inject_count, last_injected_at
+      ) VALUES (?, ?, vector32(?), NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `,
       [record.id, record.content, contentVector, ...commonArgs]
     );
@@ -149,24 +170,26 @@ export class TursoVectorSearch {
         ? `
       SELECT id, content, tags, created_at, metadata, container_tag,
              display_name, user_name, user_email, project_path, project_name,
-             git_repo_url, is_pinned,
+             git_repo_url, is_pinned, is_staged, source, authority, observed_at,
+             valid_until, inject_count, last_injected_at,
              vector_distance_cos(vector, vector32(?)) AS content_dist,
              CASE WHEN tags_vector IS NOT NULL
                THEN vector_distance_cos(tags_vector, vector32(?))
                ELSE NULL END AS tags_dist
       FROM memories
-      WHERE id IN (${placeholders})
+      WHERE id IN (${placeholders}) AND ${RETRIEVABLE_SQL}
     `
         : `
       SELECT id, content, tags, created_at, metadata, container_tag,
              display_name, user_name, user_email, project_path, project_name,
-             git_repo_url, is_pinned,
+             git_repo_url, is_pinned, is_staged, source, authority, observed_at,
+             valid_until, inject_count, last_injected_at,
              vector_distance_cos(vector, vector32(?)) AS content_dist,
              CASE WHEN tags_vector IS NOT NULL
                THEN vector_distance_cos(tags_vector, vector32(?))
                ELSE NULL END AS tags_dist
       FROM memories
-      WHERE id IN (${placeholders}) AND container_tag = ?
+      WHERE id IN (${placeholders}) AND container_tag = ? AND ${RETRIEVABLE_SQL}
     `,
       containerTag === ""
         ? [queryJson, queryJson, ...ids]
@@ -375,12 +398,15 @@ export class TursoVectorSearch {
   async listMemories(
     db: TursoDb,
     containerTag: string,
-    limit: number
+    limit: number,
+    options?: { includeNonRetrievable?: boolean }
   ): Promise<Record<string, unknown>[]> {
+    const filter = options?.includeNonRetrievable ? "" : `WHERE ${RETRIEVABLE_SQL}`;
     return containerTag === ""
       ? db.all(
           `
       SELECT * FROM memories
+      ${filter}
       ORDER BY created_at DESC
       LIMIT ?
     `,
@@ -389,7 +415,7 @@ export class TursoVectorSearch {
       : db.all(
           `
       SELECT * FROM memories
-      WHERE container_tag = ?
+      ${filter ? filter + " AND" : "WHERE"} container_tag = ?
       ORDER BY created_at DESC
       LIMIT ?
     `,
@@ -424,7 +450,7 @@ export class TursoVectorSearch {
     const rows = await db.all(
       `
       SELECT * FROM memories
-      WHERE metadata LIKE ?
+      WHERE metadata LIKE ? AND ${RETRIEVABLE_SQL}
       ORDER BY created_at DESC
     `,
       [`%"sessionID":"${sessionID}"%`]
@@ -435,6 +461,51 @@ export class TursoVectorSearch {
       tags: row.tags ? String(row.tags).split(",") : [],
       metadata: row.metadata ? (parseMetadata(String(row.metadata)) ?? {}) : {},
     }));
+  }
+
+  async updateMemoryState(
+    db: TursoDb,
+    memoryId: string,
+    state: {
+      isStaged?: boolean;
+      validUntil?: number;
+      source?: string;
+      authority?: string;
+      observedAt?: number;
+    }
+  ): Promise<void> {
+    const sets: string[] = [];
+    const args: (string | number)[] = [];
+    if (state.isStaged !== undefined) {
+      sets.push("is_staged = ?");
+      args.push(state.isStaged ? 1 : 0);
+    }
+    if (state.validUntil !== undefined) {
+      sets.push("valid_until = ?");
+      args.push(state.validUntil);
+    }
+    if (state.source !== undefined) {
+      sets.push("source = ?");
+      args.push(state.source);
+    }
+    if (state.authority !== undefined) {
+      sets.push("authority = ?");
+      args.push(state.authority);
+    }
+    if (state.observedAt !== undefined) {
+      sets.push("observed_at = ?");
+      args.push(state.observedAt);
+    }
+    if (sets.length === 0) return;
+    args.push(memoryId);
+    await db.run(`UPDATE memories SET ${sets.join(", ")} WHERE id = ?`, args);
+  }
+
+  async recordInjection(db: TursoDb, memoryId: string): Promise<void> {
+    await db.run(
+      `UPDATE memories SET inject_count = inject_count + 1, last_injected_at = ? WHERE id = ?`,
+      [Date.now(), memoryId]
+    );
   }
 
   async countVectors(db: TursoDb, containerTag: string): Promise<number> {

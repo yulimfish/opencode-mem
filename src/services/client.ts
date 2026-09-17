@@ -117,7 +117,9 @@ export class LocalMemoryClient {
       const queryVector = await embeddingService.embedWithTimeout(query, { task: "query" });
       const resolved = resolveScopeValue(scope, containerTag);
       const shards = (
-        await Promise.all(resolved.map((ref) => tursoShardManager.getAllShards(ref.scope, ref.hash)))
+        await Promise.all(
+          resolved.map((ref) => tursoShardManager.getAllShards(ref.scope, ref.hash))
+        )
       ).flat();
 
       if (shards.length === 0) {
@@ -164,6 +166,10 @@ export class LocalMemoryClient {
       projectPath?: string;
       projectName?: string;
       gitRepoUrl?: string;
+      isStaged?: boolean;
+      authority?: string;
+      observedAt?: number;
+      outcome?: string;
       [key: string]: unknown;
     }
   ) {
@@ -197,6 +203,10 @@ export class LocalMemoryClient {
           gitRepoUrl,
           type,
           tags: _tags,
+          isStaged,
+          authority,
+          observedAt,
+          source: sourceField,
           ...dynamicMetadata
         } = metadata || {};
 
@@ -216,6 +226,10 @@ export class LocalMemoryClient {
           projectPath,
           projectName,
           gitRepoUrl,
+          isStaged: isStaged ?? false,
+          source: (sourceField as string) || "api",
+          authority,
+          observedAt,
           metadata:
             Object.keys(dynamicMetadata).length > 0 ? JSON.stringify(dynamicMetadata) : undefined,
         };
@@ -269,7 +283,9 @@ export class LocalMemoryClient {
 
       const resolved = resolveScopeValue(scope, containerTag);
       const shards = (
-        await Promise.all(resolved.map((ref) => tursoShardManager.getAllShards(ref.scope, ref.hash)))
+        await Promise.all(
+          resolved.map((ref) => tursoShardManager.getAllShards(ref.scope, ref.hash))
+        )
       ).flat();
 
       if (shards.length === 0) {
@@ -326,6 +342,132 @@ export class LocalMemoryClient {
 
   async ensureStorageReady(): Promise<void> {
     await this.initialize();
+  }
+
+  /**
+   * Merge multiple memories into one new entry, soft-invalidating originals.
+   * All ids must exist and share the same shard. Staged merges are proposals:
+   * originals are NOT invalidated until human approval.
+   */
+  async mergeMemories(
+    ids: string[],
+    content: string,
+    opts?: { containerTag?: string }
+  ): Promise<{ success: boolean; id?: string; mergedFrom?: string[]; error?: string }> {
+    try {
+      await this.initialize();
+
+      if (!ids || ids.length < 2) {
+        return { success: false, error: "mergeMemories requires at least 2 ids" };
+      }
+
+      // Locate all memories and verify they share a shard.
+      const userShards = await tursoShardManager.getAllShards("user", "");
+      const projectShards = await tursoShardManager.getAllShards("project", "");
+      const allShards = [...userShards, ...projectShards];
+
+      let targetShard: (typeof allShards)[number] | null = null;
+      const found: Array<{ id: string; row: Record<string, unknown> }> = [];
+
+      for (const shard of allShards) {
+        const db = await tursoConnectionManager.getConnection(shard.dbPath);
+        for (const id of ids) {
+          const row = await tursoVectorSearch.getMemoryById(db, id);
+          if (row) {
+            if (!targetShard) targetShard = shard;
+            else if (targetShard.dbPath !== shard.dbPath) {
+              return {
+                success: false,
+                error: "All memories to merge must reside in the same shard",
+              };
+            }
+            found.push({ id, row });
+          }
+        }
+      }
+
+      if (found.length !== ids.length) {
+        const foundIds = new Set(found.map((f) => f.id));
+        const missing = ids.filter((id) => !foundIds.has(id));
+        return { success: false, error: `Memories not found: ${missing.join(", ")}` };
+      }
+
+      if (!targetShard) {
+        return { success: false, error: "No shard found for given ids" };
+      }
+
+      const isStagedMerge = found.some((f) => Number(f.row.is_staged) === 1);
+      const containerTag = opts?.containerTag || String(found[0]?.row.container_tag ?? "");
+
+      // Union tags
+      const tagSet = new Set<string>();
+      for (const f of found) {
+        const tags = f.row.tags ? String(f.row.tags).split(",") : [];
+        tags.forEach((t) => t.trim() && tagSet.add(t.trim()));
+      }
+      const mergedTags = Array.from(tagSet);
+
+      const vector = await embeddingService.embedWithTimeout(content, { task: "document" });
+      let tagsVector: Float32Array | undefined;
+      if (mergedTags.length > 0) {
+        tagsVector = await embeddingService.embedWithTimeout(formatTagsForEmbedding(mergedTags), {
+          task: "document",
+        });
+      }
+
+      const id = `mem_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+      const now = Date.now();
+      const mergedMetadata = {
+        mergedFrom: ids,
+        mergedAt: now,
+      };
+
+      const firstRow = found[0]?.row ?? {};
+      const record: MemoryRecord = {
+        id,
+        content,
+        vector,
+        tagsVector,
+        containerTag,
+        tags: mergedTags.length > 0 ? mergedTags.join(",") : undefined,
+        createdAt: now,
+        updatedAt: now,
+        metadata: JSON.stringify(mergedMetadata),
+        displayName: firstRow.display_name ? String(firstRow.display_name) : undefined,
+        userName: firstRow.user_name ? String(firstRow.user_name) : undefined,
+        userEmail: firstRow.user_email ? String(firstRow.user_email) : undefined,
+        projectPath: firstRow.project_path ? String(firstRow.project_path) : undefined,
+        projectName: firstRow.project_name ? String(firstRow.project_name) : undefined,
+        gitRepoUrl: firstRow.git_repo_url ? String(firstRow.git_repo_url) : undefined,
+        source: "api",
+      };
+
+      const { scope, hash } = extractScopeFromContainerTag(containerTag);
+      const db = await tursoConnectionManager.getConnection(targetShard.dbPath);
+
+      return tursoShardManager.withScopeWriteLock(scope, hash, async () => {
+        // Insert merged record
+        await tursoVectorSearch.insertVector(db, record);
+        await tursoShardManager.incrementVectorCount(targetShard!.id);
+
+        // Soft-invalidate originals (unless staged merge)
+        if (!isStagedMerge) {
+          for (const f of found) {
+            await tursoVectorSearch.updateMemoryState(db, f.id, { validUntil: now });
+          }
+        }
+
+        return {
+          success: true as const,
+          id,
+          mergedFrom: ids,
+        };
+      });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      log("mergeMemories: error", { error: errorMessage });
+      return { success: false as const, error: errorMessage };
+    }
   }
 
   async listShards(currentDirectory: string) {

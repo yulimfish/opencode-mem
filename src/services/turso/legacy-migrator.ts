@@ -311,6 +311,13 @@ function rowToRecord(row: Record<string, unknown>): MemoryRecord | null {
     projectPath: row.project_path ? String(row.project_path) : undefined,
     projectName: row.project_name ? String(row.project_name) : undefined,
     gitRepoUrl: row.git_repo_url ? String(row.git_repo_url) : undefined,
+    isStaged: Number(row.is_staged ?? 0) === 1,
+    source: row.source ? String(row.source) : undefined,
+    authority: row.authority ? String(row.authority) : undefined,
+    observedAt: row.observed_at != null ? Number(row.observed_at) : undefined,
+    validUntil: row.valid_until != null ? Number(row.valid_until) : 0,
+    injectCount: row.inject_count != null ? Number(row.inject_count) : 0,
+    lastInjectedAt: row.last_injected_at != null ? Number(row.last_injected_at) : undefined,
   };
 }
 

@@ -51,7 +51,13 @@ export class DeduplicationService {
 
       for (const shard of allShards) {
         const db = await tursoConnectionManager.getConnection(shard.dbPath);
-        const memories = await tursoVectorSearch.getAllMemoriesWithExtractedVectors(db);
+        const memories = await db.all(`
+          SELECT id, content, container_tag, created_at,
+                 vector_extract(vector) AS vector_json
+          FROM memories
+          WHERE is_staged = 0 AND (valid_until IS NULL OR valid_until = 0)
+          ORDER BY created_at DESC
+        `);
 
         const contentMap = new Map<string, (typeof memories)[number][]>();
 

@@ -774,6 +774,32 @@ export async function handlePinMemory(id: string): Promise<ApiResponse<void>> {
   }
 }
 
+export async function handleMergeMemories(
+  ids: string[],
+  content: string
+): Promise<ApiResponse<{ id: string; mergedFrom: string[] }>> {
+  try {
+    if (!ids || ids.length < 2) {
+      return { success: false, error: "At least 2 memory ids are required to merge" };
+    }
+    if (!content || !content.trim()) {
+      return { success: false, error: "Merged content is required" };
+    }
+    const { memoryClient } = await import("./client.js");
+    const result = await memoryClient.mergeMemories(ids, content.trim());
+    if (!result.success) {
+      return { success: false, error: result.error };
+    }
+    return {
+      success: true,
+      data: { id: result.id!, mergedFrom: result.mergedFrom! },
+    };
+  } catch (error) {
+    log("handleMergeMemories: error", { error: String(error) });
+    return { success: false, error: String(error) };
+  }
+}
+
 export async function handleUnpinMemory(id: string): Promise<ApiResponse<void>> {
   try {
     if (!id) return { success: false, error: "id is required" };

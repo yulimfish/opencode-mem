@@ -11,7 +11,7 @@ describe("plugin shutdown", () => {
   it("clears pending idle auto-capture work during cleanup", () => {
     const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
 
-    expect(source).toContain("clearTimeout(idleTimeout)");
-    expect(source).toContain("idleTimeout = null");
+    expect(source).toContain("idleTimeouts.values()");
+    expect(source).toContain("idleTimeouts.clear()");
   });
 });

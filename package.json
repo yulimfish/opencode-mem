@@ -1,7 +1,7 @@
 {
-  "name": "opencode-mem",
+  "name": "@yulimfish/opencode-mem",
   "version": "2.26.0",
-  "description": "OpenCode plugin that gives coding agents persistent memory using local Turso/libSQL vector search",
+  "description": "OpenCode plugin that gives coding agents persistent memory — Paper & Ink fork with memory evolution and hybrid injection",
   "type": "module",
   "main": "dist/plugin.js",
   "types": "dist/index.d.ts",

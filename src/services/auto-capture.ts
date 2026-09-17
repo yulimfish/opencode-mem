@@ -22,14 +22,15 @@ const SUMMARY_OUTPUT_RESERVE_BYTES = 16384;
 const SUMMARY_ANALYSIS_SUFFIX = `Analyze this conversation. If it contains technical work (code, bugs, features, decisions), create a concise summary and relevant tags. If it's non-technical (greetings, casual chat, incomplete requests), return type="skip" with empty summary.`;
 
 let isCaptureRunning = false;
+const sessionCaptureLocks = new Set<string>();
 
 export async function performAutoCapture(
   ctx: PluginInput,
   sessionID: string,
   directory: string
 ): Promise<void> {
-  if (isCaptureRunning) return;
-  isCaptureRunning = true;
+  if (sessionCaptureLocks.has(sessionID)) return;
+  sessionCaptureLocks.add(sessionID);
 
   try {
     const prompts = await userPromptManager.getUncapturedPromptsForSession(sessionID);
@@ -46,7 +47,7 @@ export async function performAutoCapture(
       await capturePrompt(ctx, sessionID, directory, prompt, maxRetries);
     }
   } finally {
-    isCaptureRunning = false;
+    sessionCaptureLocks.delete(sessionID);
   }
 }
 

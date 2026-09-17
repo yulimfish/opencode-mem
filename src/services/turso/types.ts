@@ -26,6 +26,14 @@ export interface MemoryRecord {
   projectPath?: string;
   projectName?: string;
   gitRepoUrl?: string;
+  isPinned?: boolean;
+  isStaged?: boolean;
+  source?: string;
+  authority?: string;
+  observedAt?: number;
+  validUntil?: number;
+  injectCount?: number;
+  lastInjectedAt?: number;
 }
 
 export interface SearchResult {

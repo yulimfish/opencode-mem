@@ -99,6 +99,13 @@ interface OpenCodeMemConfig {
     maxAgeDays?: number;
     injectOn?: "first" | "always";
   };
+  retrieval?: {
+    gateEnabled?: boolean;
+    candidates?: number;
+    minScore?: number;
+    injectionTokenBudget?: number;
+    injectProfileTokenBudget?: number;
+  };
 }
 
 const DEFAULTS: Required<
@@ -202,6 +209,13 @@ const DEFAULTS: Required<
     excludeCurrentSession: true,
     maxAgeDays: undefined,
     injectOn: "first",
+  },
+  retrieval: {
+    gateEnabled: true,
+    candidates: 20,
+    minScore: 0.3,
+    injectionTokenBudget: 2048,
+    injectProfileTokenBudget: 1024,
   },
 };
 
@@ -773,6 +787,16 @@ function buildConfig(fileConfig: OpenCodeMemConfig) {
       maxAgeDays: fileConfig.chatMessage?.maxAgeDays,
       injectOn: (fileConfig.chatMessage?.injectOn ?? DEFAULTS.chatMessage.injectOn) as
         "first" | "always",
+    },
+    retrieval: {
+      gateEnabled: fileConfig.retrieval?.gateEnabled ?? DEFAULTS.retrieval.gateEnabled,
+      candidates: fileConfig.retrieval?.candidates ?? DEFAULTS.retrieval.candidates,
+      minScore: fileConfig.retrieval?.minScore ?? DEFAULTS.retrieval.minScore,
+      injectionTokenBudget:
+        fileConfig.retrieval?.injectionTokenBudget ?? DEFAULTS.retrieval.injectionTokenBudget,
+      injectProfileTokenBudget:
+        fileConfig.retrieval?.injectProfileTokenBudget ??
+        DEFAULTS.retrieval.injectProfileTokenBudget,
     },
   };
 }

@@ -241,7 +241,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   logAutoCaptureProviderStatus();
   const tags = getTags(directory);
   let webServer: WebServer | null = null;
-  let idleTimeout: ReturnType<typeof setTimeout> | null = null;
+  const idleTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
   if (!isConfigured()) {
   }
@@ -402,10 +402,10 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   const cleanupPlugin = async () => {
     if (cleanedUp) return;
     cleanedUp = true;
-    if (idleTimeout) {
-      clearTimeout(idleTimeout);
-      idleTimeout = null;
+    for (const timer of idleTimeouts.values()) {
+      clearTimeout(timer);
     }
+    idleTimeouts.clear();
     if (webServer) await webServer.stop();
     if (memoryClient) await memoryClient.close();
   };
@@ -935,9 +935,24 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           return;
         }
 
-        if (idleTimeout) clearTimeout(idleTimeout);
+        // P1 fix: subagent (task tool child) sessions must not trigger
+        // project-memory capture — their transcript is already covered by
+        // the parent session, and capturing it created duplicate noise.
+        try {
+          const sessionInfo = await ctx.client.session.get({ path: { id: sessionID } });
+          if (sessionInfo?.data?.parentID) {
+            log("Auto-capture skipped for subagent session", { sessionID });
+            return;
+          }
+        } catch (error) {
+          log("session.get failed; proceeding with capture", { sessionID, error: String(error) });
+        }
 
-        idleTimeout = setTimeout(async () => {
+        const existingTimer = idleTimeouts.get(sessionID);
+        if (existingTimer) clearTimeout(existingTimer);
+
+        const timer = setTimeout(async () => {
+          idleTimeouts.delete(sessionID);
           try {
             await performAutoCapture(ctx, sessionID, directory);
 
@@ -948,10 +963,9 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
             }
           } catch (error) {
             log("Idle processing error", { error: String(error) });
-          } finally {
-            idleTimeout = null;
           }
         }, 10000);
+        idleTimeouts.set(sessionID, timer);
       }
 
       if (event.type === "session.compacted") {

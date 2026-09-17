@@ -20,6 +20,7 @@ import {
   handleStats,
   handlePinMemory,
   handleUnpinMemory,
+  handleMergeMemories,
   handleRunCleanup,
   handleRunDeduplication,
   handleDetectMigration,
@@ -581,6 +582,15 @@ export class WebServer {
           return this.jsonResponse({ success: false, error: "Invalid ID" });
         }
         const result = await handleUnpinMemory(id);
+        return this.jsonResponse(result);
+      }
+
+      if (path === "/api/memories/merge" && method === "POST") {
+        const body = (await req.json().catch(() => ({}))) as any;
+        const result = await handleMergeMemories(
+          Array.isArray(body?.ids) ? body.ids : [],
+          typeof body?.content === "string" ? body.content : ""
+        );
         return this.jsonResponse(result);
       }
 
