@@ -496,32 +496,34 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
         // P2: use hybrid search for injection when retrieval config is available
         const { rankAndSelect } = await import("./services/hybrid-search.js");
-        const listResult = await memoryClient.listMemories(
+        const searchResult = await memoryClient.searchMemories(
+          userMessage || "memory injection",
           tags.project.tag,
-          CONFIG.retrieval.candidates,
           "project"
         );
 
-        let memories = listResult.success ? listResult.memories : [];
+        let candidates = searchResult.success ? searchResult.results : [];
 
         if (CONFIG.chatMessage.excludeCurrentSession) {
-          memories = memories.filter((m: any) => m.metadata?.sessionID !== input.sessionID);
+          candidates = candidates.filter((m: any) => m.metadata?.sessionID !== input.sessionID);
         }
 
         if (CONFIG.chatMessage.maxAgeDays) {
           const cutoffDate = Date.now() - CONFIG.chatMessage.maxAgeDays * 86400000;
-          memories = memories.filter((m: any) => new Date(m.createdAt).getTime() > cutoffDate);
+          candidates = candidates.filter(
+            (m: any) => new Date(m.createdAt ?? 0).getTime() > cutoffDate
+          );
         }
 
-        if (memories.length === 0) return;
+        if (candidates.length === 0) return;
 
         // P2: rank candidates with hybrid scoring + MMR + token budget
-        const hybridCandidates = memories.map((m: any) => ({
+        const hybridCandidates = candidates.map((m: any) => ({
           id: m.id,
-          memory: m.summary,
-          similarity: 1.0,
-          createdAt: new Date(m.createdAt).getTime(),
-          tags: Array.isArray(m.metadata?.tags) ? m.metadata.tags : [],
+          memory: m.memory,
+          similarity: m.similarity ?? 0.5,
+          createdAt: m.createdAt ?? Date.now(),
+          tags: Array.isArray(m.tags) ? m.tags : [],
           metadata: m.metadata,
           injectCount: m.metadata?.injectCount,
           lastInjectedAt: m.metadata?.lastInjectedAt,
@@ -543,7 +545,9 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           const { tursoVectorSearch } = await import("./services/turso/vector-search.js");
           const { tursoConnectionManager } = await import("./services/turso/connection-manager.js");
           const { tursoShardManager } = await import("./services/turso/shard-manager.js");
-          const shards = await tursoShardManager.getAllShards("project", "");
+          const { extractScopeFromContainerTag } = await import("./services/memory-scope.js");
+          const { scope, hash } = extractScopeFromContainerTag(tags.project.tag);
+          const shards = await tursoShardManager.getAllShards(scope, hash);
           for (const shard of shards) {
             try {
               const db = await tursoConnectionManager.getConnection(shard.dbPath);

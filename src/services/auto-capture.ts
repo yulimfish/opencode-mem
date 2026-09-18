@@ -699,5 +699,6 @@ CAPTURE if: code changed, bug fixed, feature added, decision made`;
     summary: result.data.summary,
     type: result.data.type,
     tags: (result.data.tags || []).map((t: string) => t.toLowerCase().trim()),
-  };
+    ...((result.data as any).outcome ? { outcome: (result.data as any).outcome } : {}),
+  } as { summary: string; type: string; tags: string[]; outcome?: string };
 }

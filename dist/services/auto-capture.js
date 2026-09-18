@@ -555,5 +555,6 @@ CAPTURE if: code changed, bug fixed, feature added, decision made`;
         summary: result.data.summary,
         type: result.data.type,
         tags: (result.data.tags || []).map((t) => t.toLowerCase().trim()),
+        ...(result.data.outcome ? { outcome: result.data.outcome } : {}),
     };
 }

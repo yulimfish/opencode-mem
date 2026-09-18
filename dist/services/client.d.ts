@@ -77,6 +77,14 @@ export declare class LocalMemoryClient {
             projectPath: any;
             projectName: any;
             gitRepoUrl: any;
+            isPinned: boolean;
+            isStaged: boolean;
+            source: string | undefined;
+            authority: string | undefined;
+            observedAt: number | undefined;
+            validUntil: number;
+            injectCount: number;
+            lastInjectedAt: number | undefined;
         }[];
         pagination: {
             currentPage: number;

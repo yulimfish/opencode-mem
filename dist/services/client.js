@@ -216,6 +216,14 @@ export class LocalMemoryClient {
                 projectPath: r.project_path,
                 projectName: r.project_name,
                 gitRepoUrl: r.git_repo_url,
+                isPinned: Number(r.is_pinned ?? 0) === 1,
+                isStaged: Number(r.is_staged ?? 0) === 1,
+                source: r.source ? String(r.source) : undefined,
+                authority: r.authority ? String(r.authority) : undefined,
+                observedAt: r.observed_at != null ? Number(r.observed_at) : undefined,
+                validUntil: r.valid_until != null ? Number(r.valid_until) : 0,
+                injectCount: r.inject_count != null ? Number(r.inject_count) : 0,
+                lastInjectedAt: r.last_injected_at != null ? Number(r.last_injected_at) : undefined,
             }));
             return {
                 success: true,
@@ -318,6 +326,7 @@ export class LocalMemoryClient {
                 projectPath: firstRow.project_path ? String(firstRow.project_path) : undefined,
                 projectName: firstRow.project_name ? String(firstRow.project_name) : undefined,
                 gitRepoUrl: firstRow.git_repo_url ? String(firstRow.git_repo_url) : undefined,
+                isStaged: isStagedMerge,
                 source: "api",
             };
             const { scope, hash } = extractScopeFromContainerTag(containerTag);

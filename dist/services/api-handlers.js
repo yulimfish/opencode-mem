@@ -109,7 +109,9 @@ export async function handleListMemories(tag, page = 1, pageSize = 20, includePr
             const shards = await tursoShardManager.getAllShards(tagScope, hash);
             for (const shard of shards) {
                 const db = await tursoConnectionManager.getConnection(shard.dbPath);
-                const memories = await tursoVectorSearch.listMemories(db, tag, 10000);
+                const memories = await tursoVectorSearch.listMemories(db, tag, 10000, {
+                    includeNonRetrievable: true,
+                });
                 allMemories.push(...memories);
             }
         }
@@ -296,6 +298,7 @@ export async function handleAddMemory(data) {
                 projectPath: data.projectPath,
                 projectName: data.projectName,
                 gitRepoUrl: data.gitRepoUrl,
+                source: "api",
                 metadata: JSON.stringify({ source: "api" }),
             };
             const db = await tursoConnectionManager.getConnection(shard.dbPath);
@@ -678,7 +681,26 @@ export async function handleApproveMemory(id, approve) {
             const db = await tursoConnectionManager.getConnection(shard.dbPath);
             const memory = await tursoVectorSearch.getMemoryById(db, id);
             if (memory) {
-                await tursoVectorSearch.updateMemoryState(db, id, { isStaged: !approve });
+                if (approve) {
+                    // Approve: unstage this record
+                    await tursoVectorSearch.updateMemoryState(db, id, { isStaged: false });
+                    // If this is a merged record, soft-invalidate the originals
+                    const metadata = safeJSONParse(memory.metadata);
+                    const mergedFrom = metadata?.mergedFrom;
+                    if (Array.isArray(mergedFrom) && mergedFrom.length > 0) {
+                        const now = Date.now();
+                        for (const originalId of mergedFrom) {
+                            const original = await tursoVectorSearch.getMemoryById(db, originalId);
+                            if (original && Number(original.valid_until ?? 0) === 0) {
+                                await tursoVectorSearch.updateMemoryState(db, originalId, { validUntil: now });
+                            }
+                        }
+                    }
+                }
+                else {
+                    // Stage this record
+                    await tursoVectorSearch.updateMemoryState(db, id, { isStaged: true });
+                }
                 return { success: true };
             }
         }
