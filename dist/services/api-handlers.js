@@ -240,6 +240,12 @@ export async function handleListMemories(tag, page = 1, pageSize = 20, includePr
                     projectName: item.projectName,
                     gitRepoUrl: item.gitRepoUrl,
                     isPinned: item.isPinned,
+                    isStaged: item.isStaged,
+                    source: item.source,
+                    authority: item.authority,
+                    observedAt: item.observedAt,
+                    validUntil: item.validUntil,
+                    injectCount: item.injectCount,
                 };
             }
             else {
@@ -559,6 +565,11 @@ export async function handleSearch(query, tag, page = 1, pageSize = 20) {
                 for (const mid of missingMemoryIds) {
                     const m = await tursoVectorSearch.getMemoryById(db, mid);
                     if (m && !paginatedResults.some((existing) => existing.id === m.id)) {
+                        // P1: skip staged/soft-invalidated rows in linked backfill
+                        if (Number(m.is_staged ?? 0) === 1)
+                            continue;
+                        if (Number(m.valid_until ?? 0) !== 0)
+                            continue;
                         paginatedResults.push({
                             type: "memory",
                             id: String(m.id),

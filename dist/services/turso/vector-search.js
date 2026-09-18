@@ -189,7 +189,10 @@ export class TursoVectorSearch {
                 projectPath: row.project_path ? String(row.project_path) : undefined,
                 projectName: row.project_name ? String(row.project_name) : undefined,
                 gitRepoUrl: row.git_repo_url ? String(row.git_repo_url) : undefined,
-                isPinned: row.is_pinned,
+                isPinned: row.is_pinned != null ? Number(row.is_pinned) === 1 : undefined,
+                authority: row.authority ? String(row.authority) : undefined,
+                injectCount: row.inject_count != null ? Number(row.inject_count) : 0,
+                lastInjectedAt: row.last_injected_at != null ? Number(row.last_injected_at) : undefined,
             };
         });
         hydratedResults.sort((a, b) => b.similarity - a.similarity);

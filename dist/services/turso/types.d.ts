@@ -47,5 +47,9 @@ export interface SearchResult {
     projectPath?: string;
     projectName?: string;
     gitRepoUrl?: string;
+    isPinned?: boolean;
+    authority?: string;
+    injectCount?: number;
+    lastInjectedAt?: number;
 }
 //# sourceMappingURL=types.d.ts.map

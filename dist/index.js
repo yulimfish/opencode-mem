@@ -422,9 +422,9 @@ export const OpenCodeMemPlugin = async (ctx) => {
                     createdAt: m.createdAt ?? Date.now(),
                     tags: Array.isArray(m.tags) ? m.tags : [],
                     metadata: m.metadata,
-                    injectCount: m.metadata?.injectCount,
-                    lastInjectedAt: m.metadata?.lastInjectedAt,
-                    authority: m.metadata?.authority,
+                    injectCount: m.injectCount ?? m.metadata?.injectCount,
+                    lastInjectedAt: m.lastInjectedAt ?? m.metadata?.lastInjectedAt,
+                    authority: m.authority ?? m.metadata?.authority,
                 }));
                 const selected = rankAndSelect(hybridCandidates, {
                     gateEnabled: CONFIG.retrieval.gateEnabled ?? true,
