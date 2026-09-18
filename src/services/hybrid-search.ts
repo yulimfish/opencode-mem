@@ -138,12 +138,12 @@ export function rankAndSelect(
   // MMR diversity selection
   const selected = mmrSelect(scored, config.candidates);
 
-  // Token budget truncation
+  // Token budget truncation — skip oversized candidates, continue with smaller ones
   let tokenBudget = config.injectionTokenBudget;
   const result: HybridCandidate[] = [];
   for (const candidate of selected) {
     const tokens = estimateTokens(candidate.memory);
-    if (tokens > tokenBudget) break;
+    if (tokens > tokenBudget) continue;
     tokenBudget -= tokens;
     result.push(candidate);
   }

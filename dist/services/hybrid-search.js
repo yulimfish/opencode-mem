@@ -92,13 +92,13 @@ export function rankAndSelect(candidates, config, now = Date.now()) {
     scored.sort((a, b) => b.score - a.score);
     // MMR diversity selection
     const selected = mmrSelect(scored, config.candidates);
-    // Token budget truncation
+    // Token budget truncation — skip oversized candidates, continue with smaller ones
     let tokenBudget = config.injectionTokenBudget;
     const result = [];
     for (const candidate of selected) {
         const tokens = estimateTokens(candidate.memory);
         if (tokens > tokenBudget)
-            break;
+            continue;
         tokenBudget -= tokens;
         result.push(candidate);
     }
