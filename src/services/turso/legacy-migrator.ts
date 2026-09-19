@@ -365,7 +365,7 @@ async function migrateMemoryShard(dbPath: string): Promise<ShardMigrationSidecar
   }
 
   const rows = await db.all(`SELECT * FROM memories`);
-  const records: MemoryRecord[] = [];
+  let records: MemoryRecord[] = [];
   const pinnedIds: string[] = [];
   const skippedIds: string[] = [];
 
@@ -383,7 +383,7 @@ async function migrateMemoryShard(dbPath: string): Promise<ShardMigrationSidecar
   }
 
   const sourceCount = rows.length;
-  const skippedCount = skippedIds.length;
+  let skippedCount = skippedIds.length;
 
   if (skippedCount > 0) {
     throw new Error(
@@ -412,9 +412,15 @@ async function migrateMemoryShard(dbPath: string): Promise<ShardMigrationSidecar
           ")"
       )
       .join(", ");
-    throw new Error(
-      `Legacy migration aborted for ${dbPath}: ${dimensionMismatches.length} memories have inconsistent vector dimensions; expected ${sourceDimensions} (${sample})`
-    );
+    log("Legacy migration skipping dimension-mismatched memories", {
+      dbPath,
+      skipped: dimensionMismatches.length,
+      expectedDimensions: sourceDimensions,
+      sample,
+    });
+    const mismatchedIds = new Set(dimensionMismatches.map((r) => r.id));
+    records = records.filter((r) => !mismatchedIds.has(r.id));
+    skippedCount += dimensionMismatches.length;
   }
 
   const expectedCount = records.length;
