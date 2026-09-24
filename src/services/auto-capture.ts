@@ -1,4 +1,4 @@
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { PluginInput } from "../index.js";
 import { randomUUID } from "node:crypto";
 import { memoryClient } from "./client.js";
 import { getTags } from "./tags.js";

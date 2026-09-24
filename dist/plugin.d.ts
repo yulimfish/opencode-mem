@@ -1,9 +1,5 @@
-declare const OpenCodeMemPlugin: import("@opencode-ai/plugin").Plugin;
+import { Plugin } from "@opencode/plugin";
 export declare const id: string;
-export { OpenCodeMemPlugin };
-declare const _default: {
-    id: string;
-    server: import("@opencode-ai/plugin").Plugin;
-};
+declare const _default: Plugin.Plugin;
 export default _default;
 //# sourceMappingURL=plugin.d.ts.map

@@ -1,4 +1,4 @@
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { PluginInput } from "../index.js";
 import { getTags } from "./tags.js";
 import { log } from "./logger.js";
 import { CONFIG } from "../config.js";

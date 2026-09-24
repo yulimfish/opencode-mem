@@ -1,4 +1,4 @@
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { PluginInput } from "../index.js";
 interface ToolCallInfo {
     name: string;
     input: string;

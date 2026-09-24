@@ -163,6 +163,27 @@ export class UserPromptManager {
     ]);
   }
 
+  /**
+   * Record the model for the session's most recent prompt. Used by the V2
+   * `context` hook, which (unlike the V1 `chat.params` hook) has no messageID.
+   */
+  async setSessionPromptModel(
+    sessionId: string,
+    providerId: string | undefined,
+    modelId: string | undefined
+  ): Promise<void> {
+    if (!providerId || !modelId) return;
+    const db = await this.ready();
+    await db.run(
+      `UPDATE user_prompts SET provider_id = ?, model_id = ?
+       WHERE id = (
+         SELECT id FROM user_prompts WHERE session_id = ?
+         ORDER BY created_at DESC LIMIT 1
+       )`,
+      [providerId, modelId, sessionId]
+    );
+  }
+
   async getLastUncapturedPrompt(sessionId: string): Promise<UserPrompt | null> {
     const db = await this.ready();
     const maxRetries = CONFIG.autoCaptureMaxRetries ?? 3;

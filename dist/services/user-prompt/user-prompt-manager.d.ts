@@ -23,6 +23,11 @@ export declare class UserPromptManager {
     private initDatabase;
     savePrompt(sessionId: string, messageId: string, projectPath: string, content: string): Promise<string>;
     setPromptModel(messageId: string, providerId: string, modelId: string): Promise<void>;
+    /**
+     * Record the model for the session's most recent prompt. Used by the V2
+     * `context` hook, which (unlike the V1 `chat.params` hook) has no messageID.
+     */
+    setSessionPromptModel(sessionId: string, providerId: string | undefined, modelId: string | undefined): Promise<void>;
     getLastUncapturedPrompt(sessionId: string): Promise<UserPrompt | null>;
     getUncapturedPromptsForSession(sessionId: string): Promise<UserPrompt[]>;
     deletePrompt(promptId: string): Promise<void>;

@@ -1,4 +1,3 @@
-import { tool } from "@opencode-ai/plugin";
 import { memoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { getTags } from "./services/tags.js";
@@ -18,6 +17,45 @@ import { loadOpencodeProvider } from "./services/ai/opencode-provider-loader.js"
 import { isInternalStructuredSession, STRUCTURED_OUTPUT_AGENT, STRUCTURED_OUTPUT_TOOLS, } from "./services/ai/opencode-provider.js";
 import { INTERNAL_CAPTURE_SESSION_TITLE, isInternalCaptureSessionTitle, isTrackedInternalCaptureSession, } from "./services/ai/internal-capture-sessions.js";
 export { INTERNAL_CAPTURE_SESSION_TITLE, isInternalCaptureSessionTitle };
+/** JSON Schema for the memory tool input (V2 ToolEditor.add input). */
+export const MEMORY_TOOL_INPUT = {
+    type: "object",
+    properties: {
+        mode: {
+            type: "string",
+            enum: [
+                "add",
+                "search",
+                "profile",
+                "list",
+                "forget",
+                "help",
+                "migrate",
+                "list-shards",
+                "export",
+                "import",
+            ],
+            description: "Operation: add | search | profile | list | forget | help | migrate | list-shards | export | import",
+        },
+        content: { type: "string", description: "Memory content (add) or preference text (profile write)" },
+        query: { type: "string", description: "Search query (search) — technical keywords/tags rank highest" },
+        tags: { type: "string", description: "Comma-separated tags (add)" },
+        type: { type: "string", description: "Memory type (add)" },
+        memoryId: { type: "string", description: "Memory id (forget)" },
+        limit: { type: "number", description: "Result limit (list/search)" },
+        scope: { type: "string", enum: ["project", "all-projects"], description: "Search/list scope" },
+        fromPath: { type: "string", description: "Orphaned project path (migrate)" },
+        fromHash: { type: "string", description: "Orphaned project hash (migrate)" },
+        outputPath: { type: "string", description: "Export target JSON file (export)" },
+        inputPath: { type: "string", description: "Import source JSON file (import)" },
+        dryRun: { type: "boolean", description: "Preview without applying (migrate/import)" },
+        allowLinkedSource: {
+            type: "boolean",
+            description: "Allow migrating from a linked source path (migrate)",
+        },
+    },
+    additionalProperties: false,
+};
 export function isStructuredSummaryPromptMessage(userMessage) {
     // This is the plugin's own structured-summary or profile-analysis request.
     // OpenCode echoes it through chat.message like a normal user message, but
@@ -177,8 +215,6 @@ export const OpenCodeMemPlugin = async (ctx) => {
     const tags = getTags(directory);
     let webServer = null;
     const idleTimeouts = new Map();
-    if (!isConfigured()) {
-    }
     const GLOBAL_PLUGIN_WARMUP_KEY = Symbol.for("opencode-mem.plugin.warmedup");
     if (!globalThis[GLOBAL_PLUGIN_WARMUP_KEY] && isConfigured()) {
         // Fire-and-forget: DB ready + embedding model must not block plugin init.
@@ -389,16 +425,16 @@ export const OpenCodeMemPlugin = async (ctx) => {
                 const messagesResponse = await ctx.client.session.messages({
                     path: { id: input.sessionID },
                 });
-                const messages = messagesResponse.data || [];
-                const hasNonSyntheticUserMessages = messages.some((m) => m.info.role === "user" &&
-                    !m.parts.every((p) => p.type !== "text" || p.synthetic === true));
+                const messages = (messagesResponse.data || []);
+                const hasNonSyntheticUserMessages = messages.some((m) => m.info?.role === "user" &&
+                    !(m.parts ?? []).every((p) => p.type !== "text" || p.synthetic === true));
                 const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
                 const isAfterCompaction = lastMessage?.info?.summary === true;
                 const shouldInject = CONFIG.chatMessage.injectOn === "always" ||
                     !hasNonSyntheticUserMessages ||
                     (isAfterCompaction &&
-                        messages.filter((m) => m.info.role === "user" &&
-                            !m.parts.every((p) => p.type !== "text" || p.synthetic === true)).length === 1);
+                        messages.filter((m) => m.info?.role === "user" &&
+                            !(m.parts ?? []).every((p) => p.type !== "text" || p.synthetic === true)).length === 1);
                 if (!shouldInject)
                     return;
                 // P2: use hybrid search for injection when retrieval config is available
@@ -504,37 +540,9 @@ export const OpenCodeMemPlugin = async (ctx) => {
             }
         },
         tool: {
-            memory: tool({
+            memory: {
                 description: `Manage and query project memory (MATCH USER LANGUAGE: ${getLanguageName(CONFIG.autoCaptureLanguage || "en")}). Use 'search' with technical keywords/tags, 'add' to store knowledge, 'profile' for preferences. Use migrate/list-shards/export/import when a project directory moves. Search/list scope: project or all-projects.`,
-                args: {
-                    mode: tool.schema
-                        .enum([
-                        "add",
-                        "search",
-                        "profile",
-                        "list",
-                        "forget",
-                        "help",
-                        "migrate",
-                        "list-shards",
-                        "export",
-                        "import",
-                    ])
-                        .optional(),
-                    content: tool.schema.string().optional(),
-                    query: tool.schema.string().optional(),
-                    tags: tool.schema.string().optional(),
-                    type: tool.schema.string().optional(),
-                    memoryId: tool.schema.string().optional(),
-                    limit: tool.schema.number().optional(),
-                    scope: tool.schema.enum(["project", "all-projects"]).optional(),
-                    fromPath: tool.schema.string().optional(),
-                    fromHash: tool.schema.string().optional(),
-                    outputPath: tool.schema.string().optional(),
-                    inputPath: tool.schema.string().optional(),
-                    dryRun: tool.schema.boolean().optional(),
-                    allowLinkedSource: tool.schema.boolean().optional(),
-                },
+                args: MEMORY_TOOL_INPUT,
                 async execute(args) {
                     if (!isConfigured()) {
                         return JSON.stringify({
@@ -774,7 +782,7 @@ export const OpenCodeMemPlugin = async (ctx) => {
                         return JSON.stringify({ success: false, error: String(error) });
                     }
                 },
-            }),
+            },
         },
         event: async (input) => {
             const event = input.event;

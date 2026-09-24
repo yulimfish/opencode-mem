@@ -1,4 +1,4 @@
-import type { PluginInput } from "@opencode-ai/plugin";
+import type { PluginInput } from "../index.js";
 export declare function shouldRunAutomaticProfileCleanup(previousPromptCount: number, addedPromptCount: number, interval?: number): boolean;
 export declare function performUserProfileLearning(ctx: PluginInput, directory: string): Promise<void>;
 /** Upper bound for LLM-inferred preference confidence (0–1 scale). */
