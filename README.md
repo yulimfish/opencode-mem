@@ -21,6 +21,10 @@
 | Paper & Ink WebUI  | 衬线标题、纸张纹理、暖色卡片的视觉风格                                            |
 | 图谱页             | 记忆—提示词关联图谱，支持搜索、筛选、详情面板                                     |
 
+## 与 OpenChamber 扩展配合使用
+
+本项目是记忆系统本体，负责记忆存储、捕获、检索与注入，并提供独立 WebUI 作为完整管理台。若你使用 OpenChamber，也可以安装配套的 [openchamber-memory-graph-ui](https://github.com/yulimfish/openchamber-memory-graph-ui)：它通过本地受限 API 提供 OpenChamber 内的浏览、搜索、管理与图谱入口，不另建记忆存储或替代本插件的核心逻辑。两个界面连接同一套记忆数据，可按工作场景任选或搭配使用。
+
 ## 安装
 
 通过 `opencode-workflow-kit` 安装（推荐）：
