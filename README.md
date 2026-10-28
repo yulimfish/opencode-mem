@@ -1,5 +1,7 @@
 # opencode-mem — Paper & Ink 定制版
 
+[English](README.en.md)
+
 > 基于 [tickernelz/opencode-mem](https://github.com/tickernelz/opencode-mem) v2.26.0 的 Yulimfish 定制 fork。
 > 保留上游全部功能，在源码层移植记忆演进系统（P1/P2），并以 Paper & Ink 视觉风格重制 WebUI。
 
